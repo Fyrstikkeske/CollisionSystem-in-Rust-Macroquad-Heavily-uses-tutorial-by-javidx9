@@ -1,203 +1,178 @@
-use std::mem::swap;
-
 use macroquad::prelude::*;
 
-
-#[derive(Default,)]
-struct Rayrectinfo {
-    hit: bool,
-    contact_point: Vec2,
-    contact_normal: Vec2,
-    t_hit_near: f32,
+#[derive(Clone)]
+struct ConvexShape {
+    vertices: Vec<Vec2>,
 }
 
-struct DynamicRectangle{
-    rect:Rect,
-    velocity:Vec2,
+struct Simplex{
+    a: Vec2,
+    b: Vec2,
+    c: Vec2,
+
+    count:i32,
 }
 
-
-struct Ray{
-    start:Vec2,
-    direction:Vec2
-}
-
-
-#[macroquad::main("collision")]
+#[macroquad::main("GJK Collision Detection")]
 async fn main() {
-    let mut ray = Ray {
-        start: vec2(800., 350.),
-        direction: Vec2::ZERO,
+    let camera = Camera2D {
+        target: vec2(0.0, 0.0), // Where the camera is looking
+        zoom: vec2(3.0 / screen_width(), 3.0 / screen_height()), // Fit screen
+        ..Default::default()
     };
 
-    let mut player = DynamicRectangle {
-        rect: Rect::new(400., 300., 24., 50.),
-        velocity: Vec2::ZERO,
-    };
-
-    let world = vec![
-        Rect::new(-800., -50., 100., 100.),
-        Rect::new(900., 300., 100., 100.),
-        Rect::new(1000., 300., 100., 100.),
-        Rect::new(850., 0., 100., 100.),
-        Rect::new(1000., 100., 100., 100.),
-        Rect::new(1000., 200., 100., 100.),
+    let square = vec![
+        Vec2::new(-20.0, -20.0),
+        Vec2::new(20.0, -20.0),
+        Vec2::new(20.0, 20.0),
+        Vec2::new(-20.0, 20.0),
     ];
 
+    let staticsquare = vec![
+        Vec2::new(-20.0, -20.0),
+        Vec2::new(20.0, -20.0),
+        Vec2::new(20.0, 20.0),
+        Vec2::new(-20.0, 20.0),
+    ];
+
+
+
+    let mut staticshape = ConvexShape{
+        vertices: staticsquare,
+    };
+    staticshape.vertices = move_verticee_list(&staticshape.vertices, Vec2{x: 100., y:100.});
+    let mut rotation:f32 = 0.0;
+
     loop {
-        //logic
-        wrap_position(&mut player.rect);
-        let delta = get_frame_time();
-        let mouse_pos:Vec2 = mouse_position().into();
-
-        if is_mouse_button_down(MouseButton::Left) {
-            player.velocity += (mouse_pos - ray.start).normalize_or_zero() * 10.0;
-        }
-        if is_mouse_button_down(MouseButton::Right) {
-            ray.start = mouse_pos;
-        }
-        ray.direction = mouse_pos - ray.start;
-
-        let mut collisions_with: Vec<(usize, f32)> = world
-            .iter()
-            .enumerate()
-            .filter_map(|(i, _)| {
-                let info = looping_dynamic_rect_vs_rect(&world[i], &player, delta, screen_width(), screen_height());
-                if info.hit { Some((i, info.t_hit_near)) } else { None }
-            })
-            .collect();
-        
-        collisions_with.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-
-        for (i, _) in collisions_with {
-            let rayrectinfo = looping_dynamic_rect_vs_rect(&world[i], &player, delta, screen_width(), screen_height());
-            if rayrectinfo.hit {
-                player.velocity += rayrectinfo.contact_normal * player.velocity.abs() * (1.0 - rayrectinfo.t_hit_near);
-            }
+        set_camera(&camera);
+        clear_background(LIGHTGRAY);
+        let mut shape = ConvexShape{
+            vertices: rotate(&square, rotation),
+        };
+        // Handle input
+        if is_key_down(KeyCode::R) {
+            rotation += 0.1;
         }
 
-        //draw
-        player.rect.x += player.velocity.x * delta;
-        player.rect.y += player.velocity.y * delta;
+        // Update shape_b to follow mouse
+        let mousepos: Vec2 = camera.screen_to_world(mouse_position().into());
+        shape.vertices = move_verticee_list(&shape.vertices, mousepos);
 
-        clear_background(Color::new(0.0, 0.0, 0.1, 1.0));
-        draw_text(&format!("{}", get_fps()), 0.0, 40.0, 40.0, WHITE);
+        // Draw shapes
+        draw_circle(0.0,0.0, 2.0, BLUE);
+        draw_shape(&shape, RED);
+        draw_shape(&staticshape, RED);
+        let minkowski_sum = make_minkowsky_sum(&shape,&staticshape);
+        draw_dots(&minkowski_sum, RED);
 
-        for element in &world {
-            let screen_width = screen_width();
-            let screen_height = screen_height();
+
+
+        let mut direction = get_average(&shape.vertices) - get_average(&staticshape.vertices);
+        let mut dot_produkt:Vec2 = gjk_get_support_function(&shape.vertices, direction) - gjk_get_support_function(&staticshape.vertices, -direction);
+        direction = -dot_produkt;
         
-            let x_offsets = [0.0, screen_width, -screen_width];
-            let y_offsets = [0.0, screen_height, -screen_height];
-        
-            for &x_offset in &x_offsets {
-                for &y_offset in &y_offsets {
-                    let x = element.x + x_offset;
-                    let y = element.y + y_offset;
-        
-                    // Check if the rectangle is at least partially visible
-                    if x < screen_width && x + element.w > 0.0 &&
-                       y < screen_height && y + element.h > 0.0 {
-                        draw_rectangle_lines(x, y, element.w, element.h, 10.0, BEIGE);
-                    }
-                }
-            }
+
+        draw_circle(dot_produkt.x,dot_produkt.y, 3.0, BLUE);
+        draw_circle(get_average(&shape.vertices).x, get_average(&shape.vertices).y, 3.0, BLUE);
+        draw_circle(get_average(&staticshape.vertices).x,get_average(&staticshape.vertices).y, 3.0, BLUE);
+
+        let mut continuelopp = true;
+        while continuelopp{
+            dot_produkt = gjk_get_support_function(&shape.vertices, direction) - gjk_get_support_function(&staticshape.vertices, -direction);
+            draw_circle(dot_produkt.x,dot_produkt.y, 3.0, YELLOW);
+            continuelopp = false;
         }
-        draw_rectangle_lines(player.rect.x, player.rect.y, player.rect.w, player.rect.h, 10.0, PINK);
-        draw_line(ray.start.x, ray.start.y, mouse_pos.x, mouse_pos.y, 4., GOLD);
 
+        // Draw status
+        draw_text(
+            &format!("Minkowski test",),
+            20.0,
+            20.0,
+            30.0,
+            BLACK,
+        );
+        set_default_camera();
         next_frame().await;
     }
 }
 
-fn looping_dynamic_rect_vs_rect(rect: &Rect, dynrect: &DynamicRectangle, delta: f32, width: f32, height: f32) -> Rayrectinfo {
-    let x_offsets = [0.0, width, -width];
-    let y_offsets = [0.0, height, -height];
-    
-    let mut earliest_hit = Rayrectinfo::default();
+fn get_average(list: &Vec<Vec2>) -> Vec2{
+    let mut average = Vec2{x: 0.0, y:0.0};
 
-    for &x_offset in &x_offsets {
-        for &y_offset in &y_offsets {
-            let shifted_rect = Rect {
-                x: rect.x + x_offset,
-                y: rect.y + y_offset,
-                w: rect.w,
-                h: rect.h,
-            };
+    for i in list {
+        average += *i;
+    }
+    average = average / list.len() as f32;
+    return average;
+}
 
-            let info = dynamic_rect_vs_rect(&shifted_rect, dynrect, delta);
-            if info.hit && (earliest_hit.hit == false || info.t_hit_near < earliest_hit.t_hit_near) {
-                earliest_hit = info;
-                break;
-            }
+fn move_verticee_list(list: &Vec<Vec2>, translate: Vec2) -> Vec<Vec2> {
+    let mut newlist: Vec<Vec2> = vec![];
+
+    for i in 0..list.len() {
+        newlist.push(list[i] + translate);
+    }
+    return newlist;
+}
+
+fn gjk_get_support_function(list: &Vec<Vec2>, direction: Vec2) -> Vec2{
+    let mut largest_vertex: Vec2 = list[0];
+    let mut largest_dot: f32 = list[0].dot(direction);
+
+    for i in list{
+        let dot_product = i.dot(direction);
+        if dot_product > largest_dot{
+            largest_dot = dot_product;
+            largest_vertex = *i;
         }
     }
-
-    earliest_hit
-}
-
-fn dynamic_rect_vs_rect(rect: &Rect, dynrect: &DynamicRectangle, delta: f32) -> Rayrectinfo {
-    if dynrect.velocity == Vec2::ZERO {
-        return Rayrectinfo::default();
-    }
-
-
-    let expanded_rect = Rect::new(
-        rect.x - dynrect.rect.w / 2.0,
-        rect.y - dynrect.rect.h / 2.0,
-        rect.w + dynrect.rect.w,
-        rect.h + dynrect.rect.h,
-    );
-
-    let ray = Ray {
-        start: dynrect.rect.point() + dynrect.rect.size() / 2.0,
-        direction: dynrect.velocity * delta,
-    };
-    
-    let mut rayrectinfo = ray_vs_rect(&ray, &expanded_rect);
-    if rayrectinfo.hit && (rayrectinfo.t_hit_near >= 0.0 && rayrectinfo.t_hit_near <= 1.0) {
-        return rayrectinfo; 
-    }
-
-    rayrectinfo.hit = false;
-    rayrectinfo
+    return largest_vertex
 }
 
 
 
+fn make_minkowsky_sum(shape1: &ConvexShape, shape2: &ConvexShape) -> Vec<Vec2>{
+    let mut newlist: Vec<Vec2> = Vec::with_capacity(shape1.vertices.len() * shape2.vertices.len());
 
+    for list1 in 0..shape1.vertices.len() {
+        for list2 in 0..shape2.vertices.len() {
+            newlist.push(shape1.vertices[list1] - shape2.vertices[list2]);
+        }
+    }
+    return newlist;
+}
 
-fn ray_vs_rect(ray: &Ray, rect: &Rect) -> Rayrectinfo {
-    let mut t_near = (rect.point() - ray.start) / ray.direction;
-    let mut t_far = (rect.point() + rect.size() - ray.start) / ray.direction;
+fn rotate(list: &Vec<Vec2>, angle: f32) -> Vec<Vec2> {
+    let mut newlist: Vec<Vec2> = Vec::with_capacity(list.len());
+    let cos_theta = angle.cos();
+    let sin_theta = angle.sin();
 
-    if t_near.x > t_far.x { swap(&mut t_near.x, &mut t_far.x); }
-    if t_near.y > t_far.y { swap(&mut t_near.y, &mut t_far.y); }
+    for vec in list {
+        let x_new = vec.x * cos_theta - vec.y * sin_theta;
+        let y_new = vec.x * sin_theta + vec.y * cos_theta;
+        newlist.push(Vec2 { x: x_new, y: y_new });
+    }
 
-    if t_far.x.is_nan() || t_far.y.is_nan() || t_near.x.is_nan() || t_near.y.is_nan() { return Rayrectinfo::default(); }
-    if t_near.x > t_far.y || t_near.y > t_far.x { return Rayrectinfo::default(); }
+    newlist
+}
 
-    let t_hit_near = t_near.x.max(t_near.y);
-    if t_hit_near < 0.0 || t_far.x.min(t_far.y) < 0.0 { return Rayrectinfo::default(); }
+fn draw_shape(shape: &ConvexShape, color: Color) {
+    let vertices: Vec<Vec2> = shape
+        .vertices
+        .iter()
+        .map(|v| *v)
+        .collect();
 
-    let contact_normal = if t_near.x > t_near.y {
-        if ray.direction.x.is_sign_negative() { vec2(1.0, 0.0) } else { vec2(-1.0, 0.0) }
-    } else {
-        if ray.direction.y.is_sign_negative() { vec2(0.0, 1.0) } else { vec2(0.0, -1.0) }
-    };
-
-    Rayrectinfo {
-        hit: true,
-        contact_point: ray.start + t_hit_near * ray.direction,
-        contact_normal,
-        t_hit_near,
+    for i in 0..vertices.len() {
+        let p1 = vertices[i];
+        let p2 = vertices[(i + 1) % vertices.len()];
+        draw_line(p1.x, p1.y, p2.x, p2.y, 3.0, color);
     }
 }
 
 
-
-fn wrap_position(rect: &mut Rect) {
-    let (w, h) = (screen_width(), screen_height());
-    rect.x = (rect.x + w) % w;
-    rect.y = (rect.y + h) % h;
+fn draw_dots(list: &Vec<Vec2>, color: Color) {
+    for i in list {
+        draw_circle(i.x, i.y, 2.0, color);
+    }
 }
